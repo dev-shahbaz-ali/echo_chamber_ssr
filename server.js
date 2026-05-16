@@ -1,170 +1,52 @@
-// Environment variables load karein
-require('dotenv').config({ path: '.env.local' });
+// server.js — replace your existing one completely
+const { createServer } = require("http");
+const { parse } = require("url");
+const next = require("next");
+const { WebSocketServer } = require("ws");
+const jwt = require("jsonwebtoken");
+const { createClient } = require("@supabase/supabase-js");
 
-const { createServer } = require('http');
-const next = require('next');
-const { parse } = require('url');
-const { WebSocketServer } = require('ws');
-const jwt = require('jsonwebtoken');
-const { createClient } = require('@supabase/supabase-js');
+require("dotenv").config({ path: ".env.local" });
 
-const dev = process.env.NODE_ENV !== 'production';
+const dev = process.env.NODE_ENV !== "production";
 const app = next({ dev });
 const handle = app.getRequestHandler();
 
-// Debug: Check if env variables are loaded
-console.log('✅ Environment variables loaded:');
-console.log('Supabase URL:', process.env.NEXT_PUBLIC_SUPABASE_URL ? '✅ Found' : '❌ Missing');
-console.log('Supabase Anon Key:', process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ? '✅ Found' : '❌ Missing');
-console.log('Supabase Service Key:', process.env.SUPABASE_SERVICE_KEY ? '✅ Found' : '❌ Missing');
-
-// Initialize Supabase admin for backend
-const supabaseAdmin = createClient(
+const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY,
-  {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
-  }
 );
 
-// Store connected clients
+// userId (string) -> WebSocket
 const clients = new Map();
 
-// Handle private messages
-async function handlePrivateMessage(senderId, data) {
-  const { receiverId, message, clientMessageId, messageType = 'text', fileUrl, voiceDuration } = data;
-  
-  try {
-    // Save message to database
-    const { data: savedMessage, error } = await supabaseAdmin
-      .from('messages')
-      .insert([
-        {
-          sender_id: senderId,
-          receiver_id: receiverId,
-          message: message,
-          client_message_id: clientMessageId,
-          message_type: messageType,
-          file_url: fileUrl,
-          voice_duration: voiceDuration,
-          is_read: false,
-          is_delivered: false
-        }
-      ])
-      .select(`
-        *,
-        sender:users!messages_sender_id_fkey(id, username, avatar),
-        receiver:users!messages_receiver_id_fkey(id, username, avatar)
-      `)
-      .single();
-    
-    if (error) throw error;
-    
-    // Update or create conversation
-    const user1Id = Math.min(senderId, receiverId);
-    const user2Id = Math.max(senderId, receiverId);
-    
-    // Check if conversation exists
-    let { data: conversation } = await supabaseAdmin
-      .from('conversations')
-      .select('*')
-      .eq('user1_id', user1Id)
-      .eq('user2_id', user2Id)
-      .single();
-    
-    if (!conversation) {
-      const { data: newConversation } = await supabaseAdmin
-        .from('conversations')
-        .insert([
-          {
-            user1_id: user1Id,
-            user2_id: user2Id,
-            last_message: message,
-            last_message_time: new Date().toISOString(),
-            last_message_sender: senderId
-          }
-        ])
-        .select()
-        .single();
-      
-      conversation = newConversation;
-    } else {
-      // Update conversation
-      await supabaseAdmin
-        .from('conversations')
-        .update({
-          last_message: message,
-          last_message_time: new Date().toISOString(),
-          last_message_sender: senderId
-        })
-        .eq('id', conversation.id);
-      
-      // Increment unread count for receiver
-      const unreadField = receiverId === conversation.user1_id ? 'unread_count_user1' : 'unread_count_user2';
-      await supabaseAdmin
-        .from('conversations')
-        .update({ [unreadField]: supabaseAdmin.raw(`${unreadField} + 1`) })
-        .eq('id', conversation.id);
-    }
-    
-    // Send to receiver if online
-    const receiverClient = clients.get(receiverId);
-    if (receiverClient && receiverClient.ws.readyState === 1) {
-      receiverClient.ws.send(JSON.stringify({
-        type: 'new_message',
-        data: savedMessage
-      }));
-    }
-    
-    // Confirm to sender
-    const senderClient = clients.get(senderId);
-    if (senderClient && senderClient.ws.readyState === 1) {
-      senderClient.ws.send(JSON.stringify({
-        type: 'message_sent',
-        data: {
-          clientMessageId,
-          messageId: savedMessage.id,
-          timestamp: savedMessage.created_at
-        }
-      }));
-    }
-    
-  } catch (error) {
-    console.error('Error sending message:', error);
+function sendToUser(userId, data) {
+  const ws = clients.get(String(userId));
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify(data));
+    return true;
   }
+  return false;
 }
 
-// Handle mark as read
-async function handleMarkAsRead(userId, data) {
-  const { messageIds, conversationId } = data;
-  
-  try {
-    await supabaseAdmin
-      .from('messages')
-      .update({ is_read: true })
-      .in('id', messageIds);
-    
-    // Reset unread count in conversation
-    const { data: conversation } = await supabaseAdmin
-      .from('conversations')
-      .select('*')
-      .eq('id', conversationId)
-      .single();
-    
-    if (conversation) {
-      const unreadField = userId === conversation.user1_id ? 'unread_count_user1' : 'unread_count_user2';
-      await supabaseAdmin
-        .from('conversations')
-        .update({ [unreadField]: 0 })
-        .eq('id', conversationId);
-    }
-    
-  } catch (error) {
-    console.error('Error marking messages as read:', error);
-  }
+async function broadcastOnlineStatus(userId, isOnline) {
+  // Get all friends of this user
+  const { data: friends } = await supabase
+    .from("friends")
+    .select("friend_id, user_id")
+    .or(`user_id.eq.${userId},friend_id.eq.${userId}`);
+
+  if (!friends) return;
+
+  const statusData = {
+    type: "user_status_change",
+    data: { userId, isOnline, lastSeen: new Date().toISOString() },
+  };
+
+  friends.forEach((f) => {
+    const friendId = f.user_id === userId ? f.friend_id : f.user_id;
+    sendToUser(friendId, statusData);
+  });
 }
 
 app.prepare().then(() => {
@@ -172,75 +54,321 @@ app.prepare().then(() => {
     const parsedUrl = parse(req.url, true);
     handle(req, res, parsedUrl);
   });
-  
-  const wss = new WebSocketServer({ server, path: '/ws' });
-  
-  wss.on('connection', async (ws, req) => {
+
+  const wss = new WebSocketServer({ server, path: "/ws" });
+
+  wss.on("connection", async (ws, req) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    const token = url.searchParams.get('token');
-    
+    const token = url.searchParams.get("token");
+
     if (!token) {
-      ws.close(1008, 'No token provided');
+      ws.close(1008, "No token");
       return;
     }
-    
+
+    let userId;
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      const userId = decoded.userId;
-      
-      // Update user online status
-      await supabaseAdmin
-        .from('users')
-        .update({ isonline: true, last_seen: new Date().toISOString() })
-        .eq('id', userId);
-      
-      clients.set(userId, { ws, userId });
-      console.log(`✅ User ${userId} connected. Total clients: ${clients.size}`);
-      
-      ws.send(JSON.stringify({
-        type: 'connection',
-        status: 'connected',
-        userId
-      }));
-      
-      ws.on('message', async (data) => {
-        try {
-          const message = JSON.parse(data.toString());
-          
-          switch(message.type) {
-            case 'private_message':
-              await handlePrivateMessage(userId, message.data);
-              break;
-            case 'mark_read':
-              await handleMarkAsRead(userId, message.data);
-              break;
-            default:
-              console.log('Unknown message type:', message.type);
-          }
-        } catch (error) {
-          console.error('Error handling message:', error);
-        }
-      });
-      
-      ws.on('close', async () => {
-        await supabaseAdmin
-          .from('users')
-          .update({ isonline: false, last_seen: new Date().toISOString() })
-          .eq('id', userId);
-        
-        clients.delete(userId);
-        console.log(`❌ User ${userId} disconnected`);
-      });
-      
-    } catch (error) {
-      console.error('Auth error:', error);
-      ws.close(1008, 'Invalid token');
+      userId = String(decoded.userId);
+    } catch {
+      ws.close(1008, "Invalid token");
+      return;
     }
+
+    // Mark online
+    await supabase
+      .from("users")
+      .update({
+        isonline: true,
+        last_seen: new Date().toISOString(),
+      })
+      .eq("id", userId);
+
+    clients.set(userId, ws);
+    console.log(`[WS] User ${userId} connected. Total: ${clients.size}`);
+
+    ws.send(
+      JSON.stringify({
+        type: "connection",
+        status: "connected",
+        userId,
+        timestamp: new Date().toISOString(),
+      }),
+    );
+
+    await broadcastOnlineStatus(userId, true);
+
+    ws.on("message", async (raw) => {
+      let msg;
+      try {
+        msg = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+
+      const { type, data } = msg;
+      console.log(`[WS] ${userId} → ${type}`);
+
+      // ── SEND PRIVATE MESSAGE ──────────────────────────────────────
+      if (type === "private_message") {
+        const { receiverId, content, clientMessageId } = data;
+
+        const { data: saved, error } = await supabase
+          .from("messages")
+          .insert([
+            {
+              sender_id: userId,
+              receiver_id: String(receiverId),
+              content,
+              is_read: false,
+              is_delivered: false,
+            },
+          ])
+          .select(
+            `
+            *,
+            sender:users!messages_sender_id_fkey(id, username),
+            receiver:users!messages_receiver_id_fkey(id, username)
+          `,
+          )
+          .single();
+
+        if (error) {
+          console.error("[WS] Message save error:", error);
+          return;
+        }
+
+        // Deliver to receiver
+        sendToUser(receiverId, {
+          type: "new_message",
+          data: { ...saved, clientMessageId },
+        });
+
+        // Confirm to sender
+        sendToUser(userId, {
+          type: "message_sent",
+          data: {
+            clientMessageId,
+            messageId: saved.id,
+            timestamp: saved.created_at,
+          },
+        });
+      }
+
+      // ── FRIEND REQUEST ────────────────────────────────────────────
+      if (type === "friend_request") {
+        const { receiverUsername } = data;
+
+        // Look up receiver by username
+        const { data: receiver } = await supabase
+          .from("users")
+          .select("id, username")
+          .eq("username", receiverUsername)
+          .single();
+
+        if (!receiver) {
+          sendToUser(userId, {
+            type: "error",
+            data: { message: "User not found" },
+          });
+          return;
+        }
+
+        if (receiver.id === userId) {
+          sendToUser(userId, {
+            type: "error",
+            data: { message: "Cannot add yourself" },
+          });
+          return;
+        }
+
+        // Check already friends
+        const { data: existingFriend } = await supabase
+          .from("friends")
+          .select("id")
+          .or(
+            `and(user_id.eq.${userId},friend_id.eq.${receiver.id}),and(user_id.eq.${receiver.id},friend_id.eq.${userId})`,
+          )
+          .maybeSingle();
+
+        if (existingFriend) {
+          sendToUser(userId, {
+            type: "error",
+            data: { message: "Already friends" },
+          });
+          return;
+        }
+
+        // Check pending request
+        const { data: existingReq } = await supabase
+          .from("friend_requests")
+          .select("id")
+          .or(
+            `and(sender_id.eq.${userId},receiver_id.eq.${receiver.id}),and(sender_id.eq.${receiver.id},receiver_id.eq.${userId})`,
+          )
+          .eq("status", "pending")
+          .maybeSingle();
+
+        if (existingReq) {
+          sendToUser(userId, {
+            type: "error",
+            data: { message: "Request already pending" },
+          });
+          return;
+        }
+
+        const { data: friendReq, error: reqErr } = await supabase
+          .from("friend_requests")
+          .insert([
+            { sender_id: userId, receiver_id: receiver.id, status: "pending" },
+          ])
+          .select(
+            `
+            *,
+            sender:users!friend_requests_sender_id_fkey(id, username),
+            receiver:users!friend_requests_receiver_id_fkey(id, username)
+          `,
+          )
+          .single();
+
+        if (reqErr) {
+          console.error("[WS] Friend request error:", reqErr);
+          return;
+        }
+
+        // Notify receiver
+        sendToUser(receiver.id, {
+          type: "new_friend_request",
+          data: friendReq,
+        });
+
+        // Confirm to sender
+        sendToUser(userId, { type: "friend_request_sent", data: friendReq });
+      }
+
+      // ── ACCEPT / REJECT FRIEND REQUEST ───────────────────────────
+      if (type === "friend_request_response") {
+        const { requestId, accept } = data;
+
+        const { data: friendReq } = await supabase
+          .from("friend_requests")
+          .select("*, sender:users!friend_requests_sender_id_fkey(id,username)")
+          .eq("id", requestId)
+          .single();
+
+        if (!friendReq || friendReq.receiver_id !== userId) {
+          sendToUser(userId, {
+            type: "error",
+            data: { message: "Not authorized" },
+          });
+          return;
+        }
+
+        await supabase
+          .from("friend_requests")
+          .update({ status: accept ? "accepted" : "rejected" })
+          .eq("id", requestId);
+
+        if (accept) {
+          // Create bidirectional friendship
+          await supabase.from("friends").insert([
+            {
+              user_id: friendReq.sender_id,
+              friend_id: userId,
+              status: "active",
+            },
+            {
+              user_id: userId,
+              friend_id: friendReq.sender_id,
+              status: "active",
+            },
+          ]);
+
+          const payload = {
+            type: "friend_request_accepted",
+            data: { requestId, friendId: userId },
+          };
+          sendToUser(friendReq.sender_id, payload);
+          sendToUser(userId, payload);
+        } else {
+          sendToUser(friendReq.sender_id, {
+            type: "friend_request_rejected",
+            data: { requestId },
+          });
+        }
+      }
+
+      // ── TYPING ───────────────────────────────────────────────────
+      if (type === "typing") {
+        const { receiverId, isTyping } = data;
+        sendToUser(receiverId, {
+          type: "typing_indicator",
+          data: { userId, isTyping },
+        });
+      }
+
+      // ── MARK READ ────────────────────────────────────────────────
+      if (type === "mark_read") {
+        const { messageIds, senderId } = data;
+        await supabase
+          .from("messages")
+          .update({ is_read: true })
+          .in("id", messageIds)
+          .eq("receiver_id", userId);
+
+        sendToUser(senderId, {
+          type: "messages_read",
+          data: { messageIds, readerId: userId },
+        });
+      }
+
+      // ── GET MESSAGES ─────────────────────────────────────────────
+      if (type === "get_messages") {
+        const { otherUserId, limit = 50 } = data;
+
+        const { data: msgs } = await supabase
+          .from("messages")
+          .select(
+            "*, sender:users!messages_sender_id_fkey(id,username), receiver:users!messages_receiver_id_fkey(id,username)",
+          )
+          .or(
+            `and(sender_id.eq.${userId},receiver_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},receiver_id.eq.${userId})`,
+          )
+          .order("created_at", { ascending: true })
+          .limit(limit);
+
+        sendToUser(userId, {
+          type: "messages_history",
+          data: { messages: msgs || [], otherUserId },
+        });
+      }
+
+      // ── PING ─────────────────────────────────────────────────────
+      if (type === "ping") {
+        ws.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+      }
+    });
+
+    ws.on("close", async () => {
+      clients.delete(userId);
+      console.log(`[WS] User ${userId} disconnected`);
+      await supabase
+        .from("users")
+        .update({
+          isonline: false,
+          last_seen: new Date().toISOString(),
+        })
+        .eq("id", userId);
+      await broadcastOnlineStatus(userId, false);
+    });
+
+    ws.on("error", (err) =>
+      console.error(`[WS] Error ${userId}:`, err.message),
+    );
   });
-  
-  const PORT = process.env.PORT || 3000;
-  server.listen(PORT, () => {
-    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-    console.log(`🔌 WebSocket running on ws://localhost:${PORT}/ws\n`);
+
+  server.listen(3000, () => {
+    console.log("> App: http://localhost:3000");
+    console.log("> WS:  ws://localhost:3000/ws");
   });
 });
