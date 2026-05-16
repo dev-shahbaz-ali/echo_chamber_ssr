@@ -1,130 +1,168 @@
-export default function FriendList({ friends, selectedUser, onSelectUser, currentUserId, messages }) {
+export default function FriendList({
+  friends,
+  selectedUser,
+  onSelectUser,
+  currentUserId,
+  messages,
+}) {
   const getLastMessage = (userId) => {
-    const userMessages = messages.filter(msg => 
-      (msg.senderId === userId && msg.receiverId === currentUserId) ||
-      (msg.senderId === currentUserId && msg.receiverId === userId)
-    )
-    return userMessages[userMessages.length - 1]
-  }
-  
+    const userMessages = (messages || []).filter(
+      (msg) =>
+        ((msg.sender_id === userId || msg.senderId === userId) &&
+          (msg.receiver_id === currentUserId ||
+            msg.receiverId === currentUserId)) ||
+        ((msg.sender_id === currentUserId || msg.senderId === currentUserId) &&
+          (msg.receiver_id === userId || msg.receiverId === userId)),
+    );
+    return userMessages[userMessages.length - 1] || null;
+  };
+
   const getUnreadCount = (userId) => {
-    return messages.filter(msg => 
-      msg.senderId === userId && 
-      msg.receiverId === currentUserId && 
-      !msg.isRead
-    ).length
+    return (messages || []).filter(
+      (msg) =>
+        (msg.sender_id === userId || msg.senderId === userId) &&
+        (msg.receiver_id === currentUserId ||
+          msg.receiverId === currentUserId) &&
+        !msg.is_read &&
+        !msg.isRead,
+    ).length;
+  };
+
+  if (!friends || friends.length === 0) {
+    return (
+      <div style={styles.noFriends}>
+        <p>No friends yet.</p>
+        <p style={styles.hint}>Click "Find Friends" to add new friends!</p>
+      </div>
+    );
   }
-  
+
   return (
     <div style={styles.container}>
-      {friends.length === 0 ? (
-        <div style={styles.noFriends}>
-          <p>No friends yet. Send a friend request to start chatting!</p>
-        </div>
-      ) : (
-        friends.map(friend => {
-          const lastMessage = getLastMessage(friend.id)
-          const unreadCount = getUnreadCount(friend.id)
-          
-          return (
-            <div
-              key={friend.id}
-              onClick={() => onSelectUser(friend)}
-              style={{
-                ...styles.friendItem,
-                backgroundColor: selectedUser?.id === friend.id ? '#e8f0fe' : 'white'
-              }}
-            >
-              <div style={styles.avatar}>
-                {friend.username.charAt(0).toUpperCase()}
+      {friends.map((friend) => {
+        const friendUser = friend.friend || friend;
+        const lastMessage = getLastMessage(friendUser.id);
+        const unreadCount = getUnreadCount(friendUser.id);
+        const isSelected = selectedUser?.id === friendUser.id;
+
+        return (
+          <div
+            key={friendUser.id}
+            onClick={() => onSelectUser(friend)}
+            style={{
+              ...styles.friendItem,
+              backgroundColor: isSelected ? "#f1f5f9" : "transparent",
+            }}
+          >
+            <div style={styles.avatar}>
+              {friendUser.username?.charAt(0).toUpperCase()}
+            </div>
+
+            <div style={styles.friendInfo}>
+              <div style={styles.friendName}>
+                {friendUser.username}
+                <span
+                  style={{
+                    ...styles.onlineStatus,
+                    color: friendUser.isonline ? "#10b981" : "#94a3b8",
+                  }}
+                >
+                  {friendUser.isonline ? "●" : "○"}
+                </span>
               </div>
-              <div style={styles.friendInfo}>
-                <div style={styles.friendName}>
-                  {friend.username}
-                  <span style={styles.onlineStatus}>
-                    {friend.isOnline ? '🟢' : '⚫'}
-                  </span>
-                </div>
-                {lastMessage && (
-                  <div style={styles.lastMessage}>
-                    {lastMessage.senderId === currentUserId ? 'You: ' : ''}
-                    {lastMessage.content.length > 30 
-                      ? lastMessage.content.substring(0, 30) + '...' 
-                      : lastMessage.content}
-                  </div>
-                )}
-              </div>
-              {unreadCount > 0 && (
-                <div style={styles.unreadBadge}>
-                  {unreadCount}
+
+              {lastMessage && (
+                <div style={styles.lastMessage}>
+                  {lastMessage.sender_id === currentUserId ||
+                  lastMessage.senderId === currentUserId
+                    ? "You: "
+                    : ""}
+                  {(lastMessage.content || "").length > 30
+                    ? lastMessage.content.substring(0, 30) + "..."
+                    : lastMessage.content || ""}
                 </div>
               )}
             </div>
-          )
-        })
-      )}
+
+            {unreadCount > 0 && (
+              <div style={styles.unreadBadge}>{unreadCount}</div>
+            )}
+          </div>
+        );
+      })}
     </div>
-  )
+  );
 }
 
 const styles = {
   container: {
     flex: 1,
-    overflowY: 'auto'
+    overflowY: "auto",
+    backgroundColor: "#ffffff",
   },
   friendItem: {
-    display: 'flex',
-    alignItems: 'center',
-    padding: '15px',
-    cursor: 'pointer',
-    borderBottom: '1px solid #e0e0e0',
-    transition: 'background-color 0.2s'
+    display: "flex",
+    alignItems: "center",
+    padding: "12px 16px",
+    cursor: "pointer",
+    transition: "all 0.2s ease",
+    margin: "4px 8px",
+    borderRadius: "12px",
   },
   avatar: {
-    width: '50px',
-    height: '50px',
-    borderRadius: '50%',
-    backgroundColor: '#075e54',
-    color: 'white',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: '20px',
-    fontWeight: 'bold',
-    marginRight: '15px'
+    width: "48px",
+    height: "48px",
+    borderRadius: "14px",
+    backgroundColor: "#6366f1",
+    color: "white",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: "18px",
+    fontWeight: "bold",
+    marginRight: "12px",
+    flexShrink: 0,
   },
   friendInfo: {
-    flex: 1
+    flex: 1,
+    minWidth: 0,
   },
   friendName: {
-    fontWeight: 'bold',
-    marginBottom: '5px',
-    display: 'flex',
-    alignItems: 'center'
+    fontWeight: "600",
+    fontSize: "15px",
+    color: "#1e293b",
+    marginBottom: "2px",
+    display: "flex",
+    alignItems: "center",
+    gap: "4px",
   },
   onlineStatus: {
-    marginLeft: '5px',
-    fontSize: '12px'
+    fontSize: "10px",
   },
   lastMessage: {
-    fontSize: '12px',
-    color: '#666'
+    fontSize: "13px",
+    color: "#64748b",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
   },
   unreadBadge: {
-    backgroundColor: '#25d366',
-    color: 'white',
-    borderRadius: '50%',
-    width: '20px',
-    height: '20px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: '12px',
-    fontWeight: 'bold'
+    backgroundColor: "#6366f1",
+    color: "white",
+    borderRadius: "10px",
+    padding: "2px 8px",
+    fontSize: "12px",
+    fontWeight: "bold",
+    flexShrink: 0,
+    marginLeft: "8px",
   },
   noFriends: {
-    padding: '20px',
-    textAlign: 'center',
-    color: '#999'
-  }
-}
+    padding: "30px 20px",
+    textAlign: "center",
+    color: "#64748b",
+  },
+  hint: {
+    fontSize: "12px",
+    marginTop: "10px",
+  },
+};
