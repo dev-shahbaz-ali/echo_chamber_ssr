@@ -18,7 +18,18 @@ export const useWebSocket = (userId, token) => {
 
     // Close existing connection if any
     if (wsRef.current) {
-      wsRef.current.close();
+      if (
+        wsRef.current.readyState === WebSocket.OPEN ||
+        wsRef.current.readyState === WebSocket.CONNECTING
+      ) {
+        console.log("Closing existing WebSocket connection");
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
+      wsRef.current = null;
     }
 
     // Use relative protocol-relative URL to work with any host
@@ -285,14 +296,14 @@ export const useWebSocket = (userId, token) => {
   }, [connect]);
 
   const sendMessage = useCallback((type, data) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const message = JSON.stringify({ type, data });
-      wsRef.current.send(message);
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type, data }));
       console.log(`Message sent: ${type}`, data);
       return true;
     } else {
       console.log(
-        `Cannot send message: WebSocket is ${wsRef.current?.readyState}`,
+        `Cannot send message: WebSocket is ${ws ? ws.readyState : "undefined"}`,
       );
 
       // Queue message for when connection is restored
